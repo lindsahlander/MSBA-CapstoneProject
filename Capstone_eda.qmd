@@ -1,0 +1,1019 @@
+---
+title: "Exploratory Data Analysis: Swire Coca-Cola Cart Abandonment"
+author: "DataLAKE: Lindsey Ahlander, Ashley Goldstein, Kyle Aagard, Eliza Baier"
+date: "10/5/2025"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    embed-resources: true
+execute:
+  include: true
+  eval: true    
+  warning: false
+  message: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Package loading
+library(tidyverse)
+library(caret)
+library(DBI)
+library(duckdb)
+library(tidyr)
+# library(data.table)
+# library(skimr)
+library(dplyr)
+library(ggplot2)
+# library(corrplot)
+# library(ggcorrplot)
+# library(janitor)
+# library(ggthemes)
+# library(psych)
+# library(naniar)
+library(knitr)
+library(lubridate)
+library(forcats)
+library(patchwork)
+library(fuzzyjoin)
+library(skimr)
+library(data.table)
+# library(DMwR2)
+# library(car)
+
+# Set working directory
+# dir <- getwd()
+# setwd(dir)
+```
+
+# Introduction
+
+## Purpose of Analysis
+
+The goal of this exploratory data analysis (EDA) is to examine MyCoke360 digital ordering behavior, identify patterns that drive cart abandonment, and uncover factors that influence recovery or alternative ordering. The target outcome for this analysis is whether a cart is abandoned within an order window, defined as when a customer adds items to their cart but does not complete a purchase by their next scheduled cutoff time. This translates to a supervised learning binary classification problem, where the negative class (0) represents carts that are completed within the order window, and the positive class (1) represents carts that are abandoned.
+
+This EDA report will cover:
+
+-   An overview of the dataset, including Google Analytics events, orders, sales, and supporting dimension tables (customer, material, operating hours, cutoff times).
+-   Data cleaning and preprocessing steps, such as handling missing GA events, mismatched purchase records, and adjusting timestamps for time zones.
+-   Summary statistics and distributions of customer behaviors, order timing, and product-level features.
+-   Correlation and sequence analysis to identify behavioral events and conditions that precede abandonment or recovery.
+-   Identification of potential data limitations, such as dropped GA events and mismatched order tracking.
+
+The insights gained from this analysis will inform the development of a robust predictive model that minimizes risk while optimizing financial inclusion.
+
+By the end of this EDA, we expect to:
+
+-   Identify the most relevant features and event sequences that contribute to cart abandonment and recovery.
+-   Detect and address data anomalies or inconsistencies between GA, orders, and sales.
+-   Generate descriptive statistics and visualizations to highlight abandonment patterns by customer type, product, and device.
+-   Establish a foundation for feature engineering and predictive modeling that supports interventions to reduce abandonment.
+
+The findings from this analysis will serve as a foundational step in building a machine learning model and dashboard that improves MyCoke360’s ability to optimize digital ordering behavior and minimize revenue loss.
+
+# Data Overview
+
+The dataset is comprised of multiple sources capturing customer behavior and order activity on the MyCoke360 digital ordering platform. These data sources include web interaction events from Google Analytics, transaction-level records from the orders and sales tables, and supporting customer, product, and scheduling dimensions. Together, they provide visibility into who visited the site, what items they added to their carts, whether a purchase was completed, and under what timing constraints (anchor day, frequency, and cutoff times).
+
+For the purpose of this EDA, we will primarily focus on integrating event-level Google Analytics data with the orders and sales tables to establish a reliable definition of cart abandonment. Dimension tables such as customer, material, operating hours, and cutoff times will be merged to deepen the analysis with details about ordering behavior and product attributes.
+
+The target variable for this analysis is whether a cart is abandoned within an order window. We will create a binary variable from several other tables, with a more in-depth explanation in the Feature Engineering section. The negative class represents carts that resulted in a completed purchase by the scheduled cutoff time, while the positive class represents carts that remained unpurchased within the order window.
+
+## Datasets
+
+-   **Google Analytics**: Event-level log of customer interactions on MyCoke360, including clicks, page views, add-to-cart actions, and purchases.
+
+-   **Orders**: Line-level records of items ordered by customers, used to validate purchase activity against GA events.
+
+-   **Sales**: Actual items sold to customers, including adjustments for out-of-stock products. Provides the basis for revenue calculations.
+
+-   **Customer**: Metadata on customers such as customer type, sales office, and ordering channel. Used to segment abandonment by customer characteristics.
+
+-   **Material**: Product-level attributes, including category, brand, pack size, and flavor. Used to identify products most frequently abandoned.
+
+-   **Operating Hours**: Current scheduling details for each customer, including frequency, anchor day, and anchor date.
+
+-   **Cutoff Times**: Exceptions to default ordering deadlines. Critical for defining when an order window closes.
+
+## Note on Dataset Selection
+
+During the exploratory data analysis (EDA) phase, we decided to focus primarily on customer purchase behavior, honing in on patterns in order frequency, product selection, and timing, rather than revenue metrics. As a result, the sales dataset (which primarily contains financial measures like `NSI_DEAD_NET` and `GROSS_PROFIT_DEAD_NET`) was not a central part of this analysis. While the sales data could provide insights into profitability and pricing, our research questions were more aligned with understanding how customers order, abandon, or return to purchase. Therefore, we relied mainly on the orders and related dimensional tables to explore behavioral patterns.
+
+## Data Preparation
+
+To prepare the datasets for evaluation, there were several steps we took to create or adjust the columns on which to join the tables to achieved the desired outcome. To merge the `google_analytics` data with `visit_plan`, `operating_hours`, `customer`, and `cutoff_times`, we used Databricks SQL notebooks to complete the feature engineering necessary for the joins as well as the joins themselves. We also ran several queries to check our work within the query editor function in Databricks. The final dataset was exported from Databricks and imported directly into RStudio. The `orders` table preparation, merging with `customer` data and its merge with the final google analytics data is contained in the steps below.
+
+### Step 1: `visit_plan` and `cutoff_times` merge
+
+Our first step was the merge the `visit_plan` and `cutoff_times` tables to obtain a single table that contained the `cutoff_times` for all of the `visit_plans`. The `cutoff_times` table contained only the expectations to the 5:00pm cutoff rule and as such, we needed join the tables and populate all null columns with the 5:00pm cutoff. Additionally, there were some differences in how the information was presented in the tables. For example, the shipping condition description was in a different format across the two tables so we created new columns that matched across the two tables so that we could use the field as a join key. We completed a similar process for distribution mode and created a day of week for the anchor date so that in the future, we could compare cart abandonment by day of week if necessary.
+
+### Step 2: `operating_hours` table merge
+
+Our next step was to merge in the `operating_hours` table. We used a CTE to pull the frequency from the tables and used the `visit_plan` merged table as the overriding table when there were discrepancies between the information in the merged table and the `operating_hours` table. We also feature engineered the frequency field so that all of the different frequencies were formatted consistently. This was very helpful later when we had to convert the frequency to an integer. We then joined the two tables using a dual join key `customer_id` and `anchor_day_of_week`.
+
+### Step 3: `customer` table merge
+
+Our next step was to join all of this information to the `customer` table so that we would end up with a table that contained all of the relevant information, including cutoff time for each customer. We used 5 join keys to create an accurate join and used a distinct statement to eliminate duplicate rows. I also concatenated `distribution_mode` and `distribution_mode_desc` for accuracy. After joining the `customer` table, we created an `anchor_range` which was used to determine when the policy changed. If the policy, and therefore the `anchor_date`, changed, then so did the `cutoff_date`. As such, this field was a very important one to create.
+
+### Step 4: `google_analytics` merge
+
+Finally, after creating a merged table that had all of the relevant information by customer, we were able to start working on the join to the `google_analytics` table. The challenge was to create a `cutoff_timestamp` from the existing information and then join in such a way that the `event_timestamp` would be joined only to the corresponding `cutoff_timestamp`. To do this, we changed `frequency` to an integer so that it could be used in calculating the `cutoff_date`. We then created an exploded table with every possible `cutoff_date` for each customer given their anchor date and frequency. This was then filtered to include only the time range starting at the earliest timestamp in the `google_analytics` table data and continuing out 12 weeks from the end date to ensure that the cutoff dates that had been calculated for frequencies of 10 weeks would be included in the join (giving the correct end date, rather than a null value which preserved all of the necessary rows). We then combined the `cutoff_date` and `cutoff_time` provided by our previous code to create a `cutoff_timestamp`.
+
+After creating this `cutoff_window` table, we turned our attention to the `google_analytics` table. One issue we ran into was that the `google_analytics` timestamps were all in EST. To correct this, we used a CTE to parse out the state from the `sales_office_desc` and convert the `event_timestamp` to the local time. This created a new field `event_timestamp_adj` which we could then use to compare with the `cutoff_timestamp`. Finally, we joined the two tables using a window function partitioned by individual row to create a table with all of the relevant customer information attached to the `google_analytics` data. This join worked by matching `event_timestamp_adj` with the closest upcoming `cutoff_timestamp`. Unfortunately, when we first ran the join, we did not partition by individual rows and ended up with about 500k rows of missing data, even after partitioning by all of the columns. As such, we went back and added a unique `event_row_id` to help preserve all of the data. We did end up losing about 75 rows to missing anchor dates and about 23k rows to missing `sales_office_desc` (which showed the location of the sales_office and was used to calculate the adjusted event timestamp) however in the face of the 3.6 million rows we had at the end, we decided to accept the loss - especially given the fact that without the information provided in those fields, we could not accurately determine `cutoff_timestamp`.
+
+```{r, data import}
+#Import data, sAF= True if variables were all factor-able
+sales <- read.csv("sales.csv")
+google <- read.csv("google_analytics_final.csv") # This data was previously merged with the visit_plan, customer, cutoff_times, and operating_hours data
+customer <- read.csv("customer.csv", stringsAsFactors = TRUE)
+materials <- read.csv("material.csv", stringsAsFactors = TRUE)
+cutoff <- read.csv("cutoff_times.csv")
+operating <- read.csv("operating_hours.csv")
+orders <- read.csv("orders.csv")
+visit <- read.csv("visit_plan.csv")
+```
+
+```{r, glimpse, echo = FALSE}
+# Overview of the dataset
+# glimpse(google)  # Check structure
+# summary(google)  # Summary statistics
+```
+
+### Step 5: `orders` and `google_analytics` merge
+
+After obtaining the final merged `google_analytics` data, we were able to merge it with the `orders` table for a more complete dataset. As is described in our data limitations section, the google analytics data is missing random rows, some of which contain the evidence of orders. To prevent this missing data from affecting our analysis, we merged the `google_analytics` data with the `orders` data.
+
+Because the `orders` table captures every individual item by its material id, so it actually outnumbers the `add_to_cart` entries in the `google_analytics` data by quite a lot, so rather than joining directly to the `google_analytics` data, we first joined to the `customer` table.
+
+```{r}
+# merge or join the orders, customer and material tables
+merged_orders_customer_material <- orders |>
+  left_join(customer, by = c("CUSTOMER_ID" = "CUSTOMER_NUMBER")) |>
+  left_join(materials, by = "MATERIAL_ID") 
+```
+
+Then we used the same timezone mapping as used in the google analytics data to convert the created dates which were in UTC to the local timestamp. The new column, drawn from `CREATED_DATE_UTC` in the orders table, is called `CREATED_DATE_ADJUSTED` which represents when the order was created.
+
+```{r}
+sales_office_tz <- tribble(
+  ~SALES_OFFICE_DESCRIPTION,              ~tz_customer,
+  "Draper, UT",               "America/Denver",
+  "Tacoma, WA",               "America/Los_Angeles",
+  "Colorado Springs, CO",     "America/Denver",
+  "Alamosa, CO",              "America/Denver",
+  "Arlington, WA",            "America/Los_Angeles",
+  "Bellevue, WA",             "America/Los_Angeles",
+  "Tucson, AZ",               "America/Phoenix",
+  "Wilsonville, OR",          "America/Los_Angeles",
+  "Tempe, AZ",                "America/Phoenix",
+  "Twin Falls, ID",           "America/Boise",
+  "Ogden, UT",                "America/Denver",
+  "Pocatello, ID",            "America/Boise",
+  "Denver, CO",               "America/Denver",
+  "Boise, ID",                "America/Boise",
+  "Richfield, UT",            "America/Denver",
+  "Spokane, WA",              "America/Los_Angeles",
+  "Albuquerque, NM",          "America/Denver",
+  "Bend, OR",                 "America/Los_Angeles",
+  "Glenwood Springs, CO",     "America/Denver",
+  "Eugene, OR",               "America/Los_Angeles",
+  "Logan, UT",                "America/Denver",
+  "Kingman, AZ",              "America/Phoenix",
+  "Reno, NV",                 "America/Los_Angeles",
+  "Price, UT",                "America/Denver",
+  "Wenatchee, WA",            "America/Los_Angeles",
+  "Prescott, AZ",             "America/Phoenix",
+  "Pendleton, OR",            "America/Los_Angeles",
+  "Lewiston, ID",             "America/Los_Angeles",  # Idaho panhandle is Pacific
+  "Walla Walla, WA",          "America/Los_Angeles",
+  "Idaho Falls, ID",          "America/Boise",
+  "Yuma, AZ",                 "America/Phoenix",
+  "Huachuca City, AZ",        "America/Phoenix",
+  "La Grande, OR",            "America/Los_Angeles",
+  "LaGrande, OR",             "America/Los_Angeles", # misspelled La Grande entries, this was giving NAs.
+  "Scottsbluff, NE",          "America/Denver",
+  "Flagstaff, AZ",            "America/Phoenix",
+  "Glendale, AZ",             "America/Phoenix",
+  "Pueblo, CO",               "America/Denver",
+  "Grand Junction, CO",       "America/Denver",
+  "Bremerton, WA",            "America/Los_Angeles",
+  "Elko, NV",                 "America/Los_Angeles",
+  "Johnstown, CO",            "America/Denver",
+  "Cheyenne, WY",             "America/Denver",
+  "Show Low, AZ",             "America/Phoenix",
+  "Chinle, AZ",               "America/Denver"        # Navajo Nation observes DST
+)
+```
+
+```{r}
+setDT(merged_orders_customer_material)
+setDT(sales_office_tz)
+
+# Map each office to its timezone (adds column tz_customer)
+merged_orders_customer_material[sales_office_tz, on = "SALES_OFFICE_DESCRIPTION", tz_customer := i.tz_customer]
+
+# Parse the raw timestamp as UTC (POSIXct)
+merged_orders_customer_material[, CREATED_DATE_UTC := ymd_hms(CREATED_DATE_UTC, tz = "UTC")]
+
+# Create local-time columns (grouped by timezone for vectorized speed)
+merged_orders_customer_material[!is.na(tz_customer),
+  `:=`(
+    CREATED_DATE_ADJUSTED = format(with_tz(CREATED_DATE_UTC, .BY$tz_customer), "%Y-%m-%d %H:%M:%S%z"),
+    CREATED_DATE_LOCAL    = as.Date(with_tz(CREATED_DATE_UTC, .BY$tz_customer))
+  ),
+  by = tz_customer]
+```
+
+```{r}
+
+# Normalizer: remove spaces/punct, lowercase
+norm_key <- function(x) tolower(gsub("[^a-z]", "", x))
+
+setDT(merged_orders_customer_material)
+setDT(sales_office_tz)
+
+# Ensure target col exists
+if (!"tz_customer" %in% names(merged_orders_customer_material)) {
+  merged_orders_customer_material[, tz_customer := NA_character_]
+}
+
+# Build normalized keys on SALES_OFFICE_DESCRIPTION
+sales_office_tz[,                SALES_OFFICE_KEY := norm_key(SALES_OFFICE_DESCRIPTION)]
+merged_orders_customer_material[, SALES_OFFICE_KEY := norm_key(SALES_OFFICE_DESCRIPTION)]
+
+# Fill tz via update-join (in place, fast)
+merged_orders_customer_material[
+  sales_office_tz[, .(SALES_OFFICE_KEY, tz_customer)],
+  on = .(SALES_OFFICE_KEY),
+  tz_customer := i.tz_customer
+]
+
+# Parse CREATED_DATE_UTC if still character
+if (!inherits(merged_orders_customer_material$CREATED_DATE_UTC, "POSIXct")) {
+  merged_orders_customer_material[, CREATED_DATE_UTC := ymd_hms(CREATED_DATE_UTC, tz = "UTC", quiet = TRUE)]
+}
+
+# Ensure output columns exist
+if (!"CREATED_DATE_ADJUSTED" %in% names(merged_orders_customer_material)) {
+  merged_orders_customer_material[, CREATED_DATE_ADJUSTED := as.POSIXct(NA)]
+}
+if (!"CREATED_DATE_LOCAL" %in% names(merged_orders_customer_material)) {
+  merged_orders_customer_material[, CREATED_DATE_LOCAL := as.Date(NA)]
+}
+
+# Recompute only for rows with a tz and missing adjusted values
+merged_orders_customer_material[
+  !is.na(tz_customer) & is.na(CREATED_DATE_ADJUSTED),
+  `:=`(
+    CREATED_DATE_ADJUSTED = with_tz(CREATED_DATE_UTC, tz_customer),
+    CREATED_DATE_LOCAL    = as.Date(with_tz(CREATED_DATE_UTC, tz_customer))
+  ),
+  by = tz_customer
+]
+
+# Check for missing values
+merged_orders_customer_material[, .(
+  missing_tz   = sum(is.na(tz_customer)),
+  missing_adj  = sum(is.na(CREATED_DATE_ADJUSTED))
+)]
+```
+
+Next, we checked the order table to ensure that we have appropriate order start and end times, with no NAs.
+
+```{r}
+# Zero-length intervals at the (now non-NA) adjusted order times
+ord <- merged_orders_customer_material[
+  , .(CUSTOMER_ID, order_time = CREATED_DATE_ADJUSTED)
+][
+  !is.na(order_time)                         
+][
+  , `:=`(o_start = order_time, o_end = order_time)
+]
+```
+
+And we checked once more for missing values that might interfere with our data analysis.
+
+```{r}
+# Check once more for missing values
+merged_orders_customer_material[is.na(tz_customer), .N]  # how many rows unmapped
+
+# Check the SALES_OFFICE_DESCRIPTION field to make sure it is mapped correctly
+merged_orders_customer_material[is.na(tz_customer), unique(SALES_OFFICE_DESCRIPTION)]
+```
+
+After performing this merge, we noticed that there were 195 NAs under `MATERIAL_ID` This doesn't mean much for the `google_analytics` join but it does represent the 195 customers who have not made an order.
+
+```{r, warning = FALSE}
+head(merged_orders_customer_material)
+skim(merged_orders_customer_material)
+```
+
+Next, we created the target variable by adding the `CREATED_DATE_ADJUSTED` column, matching the purchase times with `add_to_cart` events, and then tagging them as abandoned or not. `1` indicates the cart was abandoned, `0` that it was not abandoned and `2` is all of the non `add_to_cart` events.
+
+```{r}
+# Copy the google analytics table to a new dataframe
+google_analytics_orders <- copy(google)
+
+# Convert to data.table
+setDT(google_analytics_orders)
+setDT(merged_orders_customer_material)
+
+# Parse to POSIXct if needed (already adjusted to local tz earlier)
+if (!inherits(google_analytics_orders$EVENT_TIMESTAMP_ADJ, "POSIXct")) {
+  google_analytics_orders[, EVENT_TIMESTAMP_ADJ := ymd_hms(EVENT_TIMESTAMP_ADJ, quiet = TRUE)]
+}
+if (!inherits(google_analytics_orders$CUTOFF_TIMESTAMP, "POSIXct")) {
+  google_analytics_orders[, CUTOFF_TIMESTAMP := ymd_hms(CUTOFF_TIMESTAMP, quiet = TRUE)]
+}
+if (!inherits(merged_orders_customer_material$CREATED_DATE_ADJUSTED, "POSIXct")) {
+  merged_orders_customer_material[, CREATED_DATE_ADJUSTED := ymd_hms(CREATED_DATE_ADJUSTED, quiet = TRUE)]
+}
+
+# Stable id to write matches back accurately
+google_analytics_orders[, ga_row := .I]
+
+# Keep only add_to_cart rows and define window end
+ga_add <- google_analytics_orders[
+  EVENT_NAME == "add_to_cart",
+  .(ga_row, CUSTOMER_ID,
+    event_time = EVENT_TIMESTAMP_ADJ,
+    window_end = CUTOFF_TIMESTAMP)
+][
+  !is.na(event_time) & !is.na(window_end) & window_end > event_time
+]
+
+# window_start = previous cutoff per customer (continuous windows)
+setorder(ga_add, CUSTOMER_ID, window_end, event_time)
+ga_add[, window_start := shift(window_end, type = "lag"), by = CUSTOMER_ID]
+
+# If first window has no previous cutoff, set a very early origin
+ga_add[is.na(window_start), window_start := as.POSIXct("1900-01-01 00:00:00")]
+
+# Orders as zero-length intervals; drop NAs
+ord <- merged_orders_customer_material[
+  , .(CUSTOMER_ID, order_time = CREATED_DATE_ADJUSTED)
+][
+  !is.na(order_time)
+][
+  , `:=`(o_start = order_time, o_end = order_time)
+]
+
+# Keys for interval join on (window_start, window_end]
+setkey(ga_add, CUSTOMER_ID, window_start, window_end)
+setkey(ord,    CUSTOMER_ID, o_start,      o_end)
+
+# All orders that fall within the current window (prev_cutoff, cutoff]
+hits <- foverlaps(
+  ord, ga_add,
+  by.x = c("CUSTOMER_ID", "o_start", "o_end"),
+  by.y = c("CUSTOMER_ID", "window_start", "window_end"),
+  type = "within", nomatch = 0L
+)
+
+# AFTER-add matches only (strict), keep earliest after per event
+hits_after <- hits[order_time > event_time][order(order_time)][, .SD[1], by = ga_row]
+setnames(hits_after, "order_time", "match_time")
+
+# Prepare result columns on working copy
+google_analytics_orders[, CREATED_DATE_ADJUSTED_MATCH := as.POSIXct(NA)]
+google_analytics_orders[, ABANDONED_CART := 2L]  # 2 for non add_to_cart
+
+# Write back matches to the add_to_cart rows
+if (nrow(hits_after) > 0) {
+  google_analytics_orders[hits_after$ga_row, CREATED_DATE_ADJUSTED_MATCH := hits_after$match_time]
+}
+
+# --- PATCH: normalize display TZ so columns compare/print consistently ---
+google_analytics_orders[
+  ,
+  `:=`(
+    EVENT_TIMESTAMP_ADJ         = with_tz(EVENT_TIMESTAMP_ADJ,         "UTC"),
+    CUTOFF_TIMESTAMP            = with_tz(CUTOFF_TIMESTAMP,            "UTC"),
+    CREATED_DATE_ADJUSTED_MATCH = with_tz(CREATED_DATE_ADJUSTED_MATCH, "UTC")
+  )
+]
+
+# CLEANUP: keep only matches STRICTLY AFTER add and ≤ cutoff
+google_analytics_orders[
+  EVENT_NAME == "add_to_cart" & !is.na(CREATED_DATE_ADJUSTED_MATCH) &
+  (CREATED_DATE_ADJUSTED_MATCH <= EVENT_TIMESTAMP_ADJ |
+   CREATED_DATE_ADJUSTED_MATCH >  CUTOFF_TIMESTAMP),
+  CREATED_DATE_ADJUSTED_MATCH := as.POSIXct(NA)
+]
+
+# Final flags: 0 = not abandoned, 1 = abandoned
+google_analytics_orders[
+  EVENT_NAME == "add_to_cart",
+  ABANDONED_CART := fifelse(!is.na(CREATED_DATE_ADJUSTED_MATCH), 0L, 1L)
+]
+
+# Drop helper id
+google_analytics_orders[, ga_row := NULL]
+```
+
+Next, we checked the distribution for the `abandon_FLAG` levels
+
+```{r}
+# getting the totals for the abandon_FLAG levels
+google_analytics_orders |>
+  group_by(ABANDONED_CART) |>
+  summarise(count = n(), .groups = "drop")
+```
+
+Then, we checked that the `ABANDONED_CART` variable matched the total number of `add_to_cart` events. The sum of the events flagged 0 and 1 should equal the number of `add_to_cart` events. Since this matched, we knew we were successful in creating our target variable and accounting for all of the `add_to_cart` events.
+
+```{r}
+24036 + 175575 # 199611
+
+# Check to ensure that all add_to_cart events are accounted for 
+google_analytics_orders |>
+  filter(EVENT_NAME == "add_to_cart") |> 
+  group_by(EVENT_NAME) |>
+  summarise(count = n(), .groups = "drop") # 199611
+```
+
+### Step 6: Transform Variables
+
+We transformed several variables from the `google_analytics` and `sales` tables to assist in our data exploration.
+
+```{r, echo = FALSE}
+# Transform google analytics variables
+google <- google |>
+  mutate(
+    across(c(EVENT_NAME, DEVICE_CATEGORY, DEVICE_MOBILE_BRAND_NAME,
+             DEVICE_OPERATING_SYSTEM, EVENT_PAGE_NAME, EVENT_PAGE_TITLE),
+           as.factor))
+
+# Transform sales variables
+sales <- sales |>
+  mutate(
+    POSTING_DATE = as.Date(POSTING_DATE, format = "%m/%d/%Y")
+  )
+```
+
+### Step 7: Merge Sales, Customer, and Materials
+
+Finally, we merged the `sales`, `customer`, and `materials` tables to obtain our final table necessary for data exploration.
+
+```{r}
+# Merge to create fact_sales table
+fact_sales <- sales |>
+  left_join(customer, by = c("CUSTOMER_ID" = "CUSTOMER_NUMBER")) |>
+  left_join(materials, by = "MATERIAL_ID") |>
+  select(
+    CUSTOMER_ID,
+    POSTING_DATE,
+    MATERIAL_ID,
+    GROSS_PROFIT_DEAD_NET,
+    NSI_DEAD_NET,
+    PHYSICAL_VOLUME,
+    SALES_OFFICE,
+    SALES_OFFICE_DESCRIPTION,
+    DISTRIBUTION_MODE_DESCRIPTION,
+    SHIPPING_CONDITIONS_DESCRIPTION,
+    COLD_DRINK_CHANNEL_DESCRIPTION,
+    CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION
+    # PACK_TYPE_DESC,       removed
+    # TRADE_MARK_DESC,      removed
+    # FLAVOUR_DESC,         removed
+    # PACK_SIZE_DESC,       removed
+    # BEV_CAT_DESC,         removed
+  )
+```
+
+## Missing Data
+
+With the table joins complete, we then looked to the data to understand and analyze the extent of missing data and work to understand how it might impact our final analysis. There were no missing values recorded in the `sales`, `customer`, `operating_hours`, `cutoff_times`, `visit_plan`, and `material` tables. The `orders` table had one missing value in `material_id`. After merging the `google_analytics` data with the `visit_plan`, `cutoff_times`, `operating_hours`, and `customer` tables, we found that the final table had 23,352 rows missing sales office. Since this impeded our ability to determine local timezone and thus cutoff time, we decided to drop these rows. Seventy-five rows were missing an anchor date and were also dropped. In this dataset, null values are coded as the string value 'null' rather than NAs so to calculate the number of null values in each column, we used the following code.
+
+```{r}
+# print the number of null values in each column
+colSums(google == "null")
+
+# print the number of empty strings in the items column
+sum(google$ITEMS == "[]")
+```
+
+After this exploration, we found that the majority of our columns did not have any null values. However, there were a few columns that did have null values as summarized by the following table.
+
+```{r}
+# create a table that shows the fields and count of null values
+(null <- tibble(
+  field = c('DEVICE_MOBILE_BRAND_NAME', 'EVENT_PAGE_NAME', 'EVENT_PAGE_TITLE', 'ITEMS', 'COLD_DRINK_CHANNEL_DESCRIPTION', 'CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION'),
+  null_count = c(39355, 997981, 317609, 2885208, 237886, 237886)
+))
+```
+
+## Imputation
+
+This data set does not have a large number of columns with missing data, and the majority of the predictors are timestamps, dates, or categorical in nature. As a result, there are not a large number of outliers that we need to deal with. There are 3 columns that contain missing data represented by either NAs or “null.”
+
+```{r}
+# Calculate percentate of NA or "null" values
+google_analytics_orders |>
+  summarise(
+    CREATED_DATE_ADJUSTED_MATCH = mean(is.na(CREATED_DATE_ADJUSTED_MATCH)) * 100,
+    COLD_DRINK_CHANNEL_DESCRIPTION = mean(COLD_DRINK_CHANNEL_DESCRIPTION == 'null') * 100,
+    CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION = mean(CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION == 'null') * 100) |>
+  round(2)
+```
+
+-   `CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION` – 6.46% of the rows have the value “null.” This column only has 10 unique categories such as “Restaurant,” “Hotel,” “Distributor,” etc. Rather than removing rows or imputing to the largest category, we will factor this predictor.
+
+-   `COLD_DRINK_CHANNEL_DESCRIPTION` – 6.46% of the rows have the value “null.” This column has 58 unique values, and as a result, we will take a similar approach in factoring this column.
+
+-   `CREATED_DATE_ADJUSTED_MATCH`– 99.35% of the rows are showing as NAs. This column is a timestamp of when an order was created that was pulled from the orders table. The timestamp is only populated when the order took place between an `add_to_cart` event and prior to the `CUTOFF_TIMESTAMP`. Out of 3,680,736 rows in the data set, there are only 199,611 `add_to_cart` events. For this column we will impute it with a dummy variable to eliminate the NAs.
+
+```{r}
+# Impute NAs and "null" values
+google_analytics_orders <- google_analytics_orders |>
+  mutate(CREATED_DATE_ADJUSTED_MATCH = ifelse(is.na(CREATED_DATE_ADJUSTED_MATCH), # Replace NA in CREATED_DATE_ADJUSTED_MATCH with dummy variable
+      "9999-99-99 99:99:99",CREATED_DATE_ADJUSTED_MATCH),
+      
+# Convert columns into factors 
+COLD_DRINK_CHANNEL_DESCRIPTION = factor(COLD_DRINK_CHANNEL_DESCRIPTION),
+CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION = factor(CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION))
+```
+
+## Outliers
+
+As we conducted our exploratory data analysis, we did not notice any obvious outliers. More thorough investigation will be done in the future to ensure any potential outliers, especially to any numeric variables we may create will not negatively affect our analysis.
+
+## Independent Variable Analysis
+
+When we realized we wanted to focus on purchasing behavior that led to abandonment, that helped to narrow our focus in our EDA. We broke the variable analysis down into related categories.
+
+### Device and Browsing Behavior
+
+-   **Device category & operating system:** Most sessions come from desktops, with Windows dominating as the primary operating system.
+-   **Device brand names:** Google, Apple, and Microsoft are the most common brands, reflecting concentration among a few large providers. This shows that optimizing experiences for these ecosystems could have the biggest impact.
+
+```{r}
+# Plot 1: Device category (Desktop, Mobile, Tablet)
+p1 <- google_analytics_orders |>
+  count(DEVICE_CATEGORY, sort = TRUE) |>
+  ggplot(aes(x = fct_reorder(DEVICE_CATEGORY, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Device Category Distribution",
+       x = "Device Category", y = "Count") +
+  theme_minimal()
+
+# Plot 2: Device brand names
+p2 <- google_analytics_orders |>
+  count(DEVICE_MOBILE_BRAND_NAME, sort = TRUE) |>
+  head(10) |>
+  ggplot(aes(x = fct_reorder(DEVICE_MOBILE_BRAND_NAME, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top 10 Device Brand Names",
+       x = "Device Brand Name", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 3: Browser
+p3 <- google_analytics_orders |>
+  count(DEVICE_OPERATING_SYSTEM, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(DEVICE_OPERATING_SYSTEM, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top Operating Systems",
+       x = "Operating System", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Show p1 and p3 side-by-side
+(p1|p3)
+
+# Show p2
+p2
+```
+
+### Location/Operational Metrics
+
+-   **Top Plants / Sales Offices:** Draper, UT is by far the most frequent sales office, followed by Denver and Tempe. This concentration highlights certain geographic hubs where abandonment may have an outsized revenue impact.
+
+-   **Anchor Days:** Monday is the most common anchor day for ordering, which aligns with weekly replenishment cycles. The weekday spikes suggest that abandonment patterns may vary depending on the customer’s scheduled order day.
+
+-   **Cutoff Frequency:** Most customers have weekly cutoff times, with smaller segments spacing cutoff times out to every two or four weeks. Weekly customers represent the highest risk group for repeat abandonment, since they generate the most sessions.
+
+```{r}
+# Plot 4: Plant / Sales Office
+p4 <- google_analytics_orders |>
+  count(SALES_OFFICE_DESC, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(SALES_OFFICE_DESC, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top 10 Plants / Sales Offices",
+       x = "Plant / Sales Office", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 5: Anchor day (ordering day of week)
+p5 <- google_analytics_orders |>
+  count(ANCHOR_DAY_OF_WEEK, sort = TRUE) |>
+  ggplot(aes(x = fct_reorder(ANCHOR_DAY_OF_WEEK, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Distribution of Anchor Days",
+       x = "Anchor Day", y = "Count") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 6: Frequency buckets (every 1, 2, 4 weeks)
+p6 <- google_analytics_orders |>
+  count(FREQUENCY_FINAL, sort = TRUE) |>
+  ggplot(aes(x = fct_reorder(FREQUENCY_FINAL, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Customer Order Frequency",
+       x = "Frequency", y = "Count") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Show p4
+p4
+
+# Show p5 and p6 side-by-side
+(p5|p6)
+```
+
+### Page Activity
+
+-   **Event Page Names & Titles:** Cart, Checkout, and Orders pages appear heavily among the top events. These are key funnel steps where abandonment is most likely to occur. The presence of “null” values suggests some event tracking limitations, which we will need to keep in mind when interpreting data.
+
+```{r}
+# Plot 7: Event page names
+p7 <- google_analytics_orders |>
+  count(EVENT_PAGE_NAME, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(EVENT_PAGE_NAME, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top 10 Event Page Names",
+       x = "Event Page Name", y = "Count") +
+  coord_flip() +
+  theme_minimal()
+
+# Plot 8: Event page titles
+p8 <- google_analytics_orders |>
+  count(EVENT_PAGE_TITLE, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(EVENT_PAGE_TITLE, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top 10 Event Page Titles",
+       x = "Event Page Title", y = "Count") +
+  coord_flip() + 
+  theme_minimal() 
+
+# Facet wrap
+p7
+p8
+```
+
+## Business Demographics
+
+-   **Business Categories:** Restaurants and food services dominate the business category breakdown. These segments likely contribute to cart abandonment due to sheer volume of market share and possible difficulties with staff turnover or seasonality needs.
+
+```{r}
+# Plot 9: Customer sub trade channels
+p9 <- google_analytics_orders |>
+  count(COLD_DRINK_CHANNEL_DESCRIPTION, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(COLD_DRINK_CHANNEL_DESCRIPTION, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top 10 Business Category",
+       x = "Business Category", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 10: Customer sub trade channels
+p10 <- google_analytics_orders |>
+  count(CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top 10 Business Sub Categories",
+       x = "Business Sub Category", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Arrange: 2 per row, then 1 on last row
+p9|p10
+```
+
+### Shipping Attributes
+
+-   **Cutoff Times:** Most cutoff times are clustered around the standard cutoff time of 5:00 PM, but there is variation across sales offices. Customers ordering close to cutoff deadlines may abandon carts more often if they miss their window. We can explore this more during modeling.
+
+-   **Shipping Conditions:** “48 Hours” shipping is most common, which suggests relatively consistent delivery expectations. Differences in shipping speed could interact with cart abandonment, particularly for time-sensitive customers. Those that missed cutoffs or need immediate attention moving towards 24 Hours or expedited methods.
+
+```{r}
+# Plot 12: Cutoff Times
+p12 <- google_analytics_orders |>
+  count(CUTOFFTIME__C, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(CUTOFFTIME__C, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Top CutOff Times",
+       x = "Cutoff Time", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 13: Shipping Description
+p13 <- google_analytics_orders |>
+  count(SHIPPING_CONDITIONS_DESC, sort = TRUE) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = fct_reorder(SHIPPING_CONDITIONS_DESC, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Shipping Time Distribution",
+       x = "Shipping Times", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Facet wrap
+(p12|p13) 
+```
+
+### Target variable
+
+-   **Overall Distribution:** The majority of google analytic events are classified as “Unrelated” to building a cart or purchasing. There is a meaningful amount of abandoned carts, and less though a meaningful share show abandonment behavior.
+
+-   **Abandonment Comparison:** When filtering out unrelated events, we see a clearer binary split between purchased and abandoned orders. This binary framing will be central to modeling abandonment risk.
+
+```{r}
+# Plot: Target Variable Distribution (Cart Abandonment)
+p14 <- google_analytics_orders |>
+  count(ABANDONED_CART, sort = TRUE) |>
+  mutate(ABANDONED_CART = factor(ABANDONED_CART,
+                                 levels = c(0,1,2),
+                                 labels = c("Not Abandoned", "Abandoned", "Unrelated Events"))) |>
+  ggplot(aes(x = ABANDONED_CART, y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Cart Abandonment Behaviors",
+       x = "Abandonment Status", y = "Count") +
+  theme_minimal()
+
+# Plot 15: Target distribution no unrelated events
+p15 <- google_analytics_orders |>
+  filter(ABANDONED_CART %in% c(0,1)) |>
+  count(ABANDONED_CART, sort = TRUE) |>
+  mutate(ABANDONED_CART = factor(ABANDONED_CART,
+                                 levels = c(0,1),
+                                 labels = c("Not Abandoned", "Abandoned"))) |>
+  ggplot(aes(x = ABANDONED_CART, y = n)) +
+  geom_bar(stat = "identity", fill = "#BB021E") +
+  labs(title = "Cart Abandonment Behaviors",
+       x = "Abandonment Status", y = "Count") +
+  theme_minimal()
+
+# Show plots p14 and p15
+p14|p15
+```
+
+## Numerical variable analysis
+
+Due to our choice to limit our scope to behavioral analysis, we were left with no numerical variables like revenue to work with. In the future, we plan to do further analysis to create numerical variables. For example, one that would be important to calculate would be the number of items in cart at checkout or abandonment. This lends itself to greater understanding of customer behavior leading to cart abandonment.
+
+## Dataset
+
+### Merging
+
+The majority of our table merging was completed in Databricks. First, `visit_plan` and `cut_off times` were merged to obtain a single table that contained all relevant information pertaining to customer cutoff times. The resulting table was joined to the customer table. To ensure an accurate join without duplication or mixed information, five keys were used to match rows. An anchor range was used to determine if the policy changed so we could keep up with accurate cutoff dates.
+
+To join the google analytics table, we started by adjusting the event timestamp to the customer's local time, creating a column called `EVENT_TIMESTAMP_ADJ`. Since cutoff times were recorded in local time zones, the analytics event needed to be converted to be accurate. We also feature engineered a series of order windows for each anchor date, using our anchor range to understand if the policy changed. From there, we could determine the closest future cutoff date to a policy and noted that as `cutoff_timestamp`. This will allow us to create our target variable by noting if there was an order timestamp within the range of the analytics `add_to_cart` event and the `cutoff_timestamp`.
+
+### Feature Engineering
+
+Feature engineering is a critical part of the EDA, for us it involved identifying and labeling our target variable. Below are the steps we took during this process
+
+-   Convert categorical and operational dimensions (e.g., device type, anchor day, frequency, cutoff times) into model-ready variables.
+
+-   Engineer time-based features derived from anchor date and frequency like `EVENT_TIMESTAMP_ADJ`, `CUTOFF_TIMESTAMP` to capture order based events.
+
+-   Create target variable by determining if there was an order placed between an "add_to_cart" event and the customer cutoff time.
+
+## Correlation Exploration
+
+Since our dataset is primarily categorical, we will not be performing a traditional correlation analysis. Instead, we will be looking at the relationships between categorical variables and our target variable, `ABANDONED_CART`. This section will include chi-square tests and visualizations to understand how different categories relate to cart abandonment behavior.
+
+**Chi-Square Tests**
+
+Below are three chi-square tests we performed to understand the relationship between categorical variables and our target variable, `ABANDONED_CART`. The variables we tested were `DEVICE_CATEGORY`, `FREQUENCY_FINAL`, and `EVENT_PAGE_NAME`. Our hypothesis is that these variables will have a significant relationship that contribute to cart abandonment behavior.
+
+```{r}
+# chi-square test for DEVICE_CATEGORY and ABANDONED_CART
+table_device <- table(google_analytics_orders$DEVICE_CATEGORY, google_analytics_orders$ABANDONED_CART)
+chisq_device <- chisq.test(table_device)
+chisq_device
+
+```
+
+The chi-square test for `DEVICE_CATEGORY` and `ABANDONED_CART` shows a significant relationship (p-value \< 0.05), indicating that device type may influence cart abandonment behavior.
+
+Next, we visualized the relationship between `DEVICE_CATEGORY` and `ABANDONED_CART` to better understand how different devices contribute to cart abandonment.
+
+```{r}
+# visualize the relationship between DEVICE_CATEGORY and ABANDONED_CART (only abandoned carts)
+google_analytics_orders %>%
+  filter(ABANDONED_CART == 1) %>%
+  ggplot(aes(x = DEVICE_CATEGORY, fill = DEVICE_CATEGORY)) +
+  geom_bar() +
+  scale_fill_manual(
+    values = c(
+      "desktop" = "#BB021E",  
+      "mobile" = "gray80",
+      "tablet" = "gray80"
+    )
+  ) +
+  labs(
+    title = "Abandoned Carts by Device Category",
+    x = "Device Category",
+    y = "Count",
+    fill = "Device Category"
+  ) +
+  theme_minimal()
+
+```
+
+This plot shows that desktop users have a higher count of abandoned carts compared to mobile and tablet users. This may suggest that desktop users are more likely to abandon their carts, but according to earlier analysis, most users are using desktops, so this may be a reflection of overall usage rather than a higher abandonment rate. Further analysis is needed to confirm this significance.
+
+Here we perform chi-square tests for `FREQUENCY_FINAL` and `EVENT_PAGE_NAME`. Our theory is that perhaps different ordering frequencies tend to have different abandonment rates.
+
+```{r}
+# chi-square test for FREQUENCY_FINAL and ABANDONED_CART
+table_frequency <- table(google_analytics_orders$FREQUENCY_FINAL, google_analytics_orders$ABANDONED_CART)
+chisq_frequency <- chisq.test(table_frequency)
+chisq_frequency
+
+```
+
+The output suggests a significant relationship (p-value \< 0.05) between `FREQUENCY_FINAL` and `ABANDONED_CART`, indicating that ordering frequency may influence cart abandonment behavior. In order to fully understand this relationship, we visualized the data to see how different frequencies contribute to cart abandonment.
+
+```{r}
+# visualize the relationship between FREQUENCY_FINAL and ABANDONED_CART (only abandoned carts)
+google_analytics_orders %>%
+  filter(ABANDONED_CART == 1) %>%
+  ggplot(aes(x = FREQUENCY_FINAL, fill = FREQUENCY_FINAL)) +
+  geom_bar() +
+  scale_fill_manual(
+    values = c(
+      "Every Week" = "#BB021E",  
+      "Every 2 Weeks" = "gray80",
+      "Every 3 Weeks" = "gray80",
+      "Every 4 Weeks" = "gray80"
+
+    )
+  ) +
+  labs(
+    title = "Abandoned Carts by Order Frequency",
+    x = "Order Frequency",
+    y = "Count",
+    fill = "Order Frequency"
+  ) +
+  theme_minimal()
+
+```
+
+This plot indicates that customers who order every week have a higher count of abandoned carts compared to those who order every 2, 3, or 4 weeks. This suggests that customers with more frequent ordering patterns may be more prone to cart abandonment. However, similar to the device category analysis, this may also be a reflection of overall usage rather than a higher abandonment rate. Further analysis is needed to confirm this significance.
+
+Finally, we performed a chi-square test for `EVENT_PAGE_NAME` and `ABANDONED_CART`. Our hypothesis is that certain pages in the ordering process may have higher abandonment rates.
+
+```{r}
+# chi-square test for EVENT_PAGE_NAME and ABANDONED_CART
+table_event_page <- table(google_analytics_orders$EVENT_PAGE_NAME, google_analytics_orders$ABANDONED_CART)
+chisq_event_page <- chisq.test(table_event_page)
+chisq_event_page
+
+```
+
+The output suggests a significant relationship (p-value \< 0.05) between `EVENT_PAGE_NAME` and `ABANDONED_CART`, indicating that the page a user is on may influence cart abandonment behavior. To better understand this relationship, we visualized the data to see how different pages contribute to cart abandonment.
+
+```{r}
+# visualize the relationship between EVENT_PAGE_NAME and ABANDONED_CART (only abandoned carts)
+google_analytics_orders %>%
+  filter(ABANDONED_CART == 1) %>%
+  count(EVENT_PAGE_NAME, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  ggplot(aes(x = fct_reorder(EVENT_PAGE_NAME, n), y = n, fill = EVENT_PAGE_NAME)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(
+    values = c(
+      "MyCoke Orders" = "#BB021E",  
+      "null" = "gray80",
+      "MyCoke Orders - Product: " = "gray80",
+      "Product List" = "gray80",
+      "MyCoke Dashboard" = "gray80",
+      "Cart Screen" = "gray80"
+    )
+  ) +
+  labs(
+    title = "Top 5 Abandoned Carts by Event Page Name",
+    x = "Event Page Name",
+    y = "Count",
+    fill = "Event Page Name"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Looking at the top 5 event page names for abandoned carts, we see that "MyCoke Orders" has the highest count of abandoned carts. This suggests that users on this page may be more likely to abandon their carts. However, the presence of "null" values indicates some limitations in event tracking, which we need to consider when interpreting this data.
+
+**Correlation Conclusion**
+
+In conclusion, our chi-square tests and visualizations indicate significant relationships between `DEVICE_CATEGORY`, `FREQUENCY_FINAL`, `EVENT_PAGE_NAME`, and `ABANDONED_CART`. These findings suggest that device type, ordering frequency, and the specific page a user is on may influence cart abandonment behavior. However, further analysis is needed to confirm these relationships and understand the underlying causes of cart abandonment. We will need to consider the overall usage patterns and potential confounding factors in our future analysis.
+
+## Logistic Regression
+
+In this section, we will build our baseline logistic regression model that estimates the intercept only. This model will serve as a benchmark in future modeling analysis to ensure that more complex models are providing value beyond a simple baseline.
+
+```{r}
+# baseline logistic regression model
+baseline_model <- glm(ABANDONED_CART ~ 1, data = google_analytics_orders %>% filter(ABANDONED_CART %in% c(0,1)), family = binomial)
+summary(baseline_model)
+
+# convert estimate to probability
+baseline <- exp(coef(baseline_model)) / (1 + exp(coef(baseline_model)))
+round(baseline, 2) # 0.88 probability of abandonment
+
+```
+
+**Model Conclusion**
+
+Our baseline model estimates that the probability of cart abandonment is **88%**. This high baseline rate indicates that cart abandonment is a prevalent issue in our dataset. Future models will need to significantly outperform this baseline to be considered effective. We will explore more complex models and additional features in subsequent analyses to better understand and predict cart abandonment behavior.
+
+# Summary of Findings
+
+## Knowledge of Dataset Limitations
+
+While the integrated MyCoke360 datasets provide in-depth visibility into ordering behavior, there are several limitations that must be considered when interpreting results:
+
+-   **Incomplete Event Tracking in Google Analtyics:** Some purchase events are missing from Google Analytics (GA), even though the orders table shows a completed order in the same window. This creates a gap in the event-to-order mapping.
+
+    -   *Action:* To correct this when calculating our target variable, we used the orders table as the final, ground truth for whether an order was placed within the window or not. This helped us fill in the GA data when some events were missing.
+
+-   **Mismatch between orders and sales:** The items logged in GA under `add_to_cart` and `purchase` do not always align with the final order as some items may be out of stock when the order is filled or there may be incomplete information capture in the GA table. This is especially pronounced in mobile purchases, where GA fails to capture items.
+
+    -   *Action:* Cart revenue was calculated separately for sales and orders, for abandoned carts, sales revenue was assumed to be 100% filled. (Or should we see fulfillment statistics and calculate based on that?) Mobile purchase itemization and revenue calculations were based off the corresponding order.
+
+-   **Timestamp Challenges:** All timestamps in GA table are within EST, while cutoff times are local to the customer's sales office. Some GA entries contain null values for sales office, leading to possible miscalculations in cutoff times.
+
+    -   *Action:* Sales office locations were mapped to respective time zones, then the GA timestamp was adjusted to customer's local time and saved as `EVENT_TIMESTAMP_ADJ`. Null values were dropped (23,352 row loss).
+
+-   **Multi-Plant Customers:** Some customers order from multiple plants with differing cutoff times.
+
+    -   *Action:* Customers were assigned to their most frequent plant to apply the correct cutoff rules. This assumption may not capture edge cases.
+
+-   **Unreliable customer mapping:** Matching by date and account ID is unreliable as some customers may make several purchases on the same day.
+
+    -   *Action:* We attempted to use a multi-key identification with date, customer ID, purchase method, and item quantity.
+
+## Future Continuation
+
+We are pleased with the progress made in our preliminary analysis. The EDA gave us a lot of information to work with and helped us narrow our focus to the primary business question: "What behaviors influence cart abandonment?". Moving forward, we have a lot of additional work to do before we can confidently describe customer behaviors.
+
+Our next steps include:
+
+**Feature Engineering**
+
+-   Engineer time-based features such as hours before cutoff and days since last order to capture customer cadence in purchasing
+-   Turn event-level data into session-level features to include number of items in cart and time from cart build to purchase
+
+**Modeling**
+
+-   Cluster dataset into segments that have similar behavior and outcomes of abandonment/purchase
+-   Build simple models to estimate the probability of cart abandonment (classification/logistic regression)
+-   Move forward with more complex methods (RF, XGBoost) to see if there is a better method to capture cart abandonment
+
+**Post-Model Analysis**
+
+-   Break down abandonment risk across different subgroups to identify where interventions will have the highest impact
+-   Assess device-specific abandonment trends (desktop vs. mobile vs. tablet) to prioritize interface improvements
+
+**Validation and Monitoring**
+
+-   Validate model performance on holdout data and ensure robustness against known google analytics limitations
+-   Identify the utility of creating future framework that tracks abandonment rates over time and flags anomalies for business stakeholders
+
+## Conclusion of Findings
+
+In conclusion, our exploratory data analysis allowed us to understand the dataset and its limitations, create a target variable, and identify key relationships that will help inform future modeling efforts. We were able to join multiple datasets to create a comprehensive view of customer behavior leading up to cart abandonment. Now that we have this dataset as our foundation, our future work will focus on using those key relationships identified in this EDA to build predictive models that can help reduce cart abandonment and ultimately increase revenue for Swire Coca-Cola.
+
+## Group Member Contributions
+
+Section | Contributor(s)
+--- | ---
+Introduction | Ashley
+Data Sets | Ashley
+Note on Dataset Selection | Ashley
+Data Preparation | Eliza / Kyle
+Missing Data | Eliza
+Imputation | Kyle
+Outliers | Eliza
+Independent Variable Analysis | Ashley
+Business Demographics | Ashley / Eliza
+Numerical Variable Analysis | Eliza
+Dataset (Merging & Feature Engineering) | Ashley
+Correlation Exploration | Lindsey
+Logistic Regression | Lindsey
+Summary of Findings | All
+
