@@ -19,6 +19,12 @@ execute:
 
 ## Introduction 
 
+### Note to Reader
+
+The way our group approached the modeling phase of this project was to first revisit our business understanding and the problem we were trying to solve. The business question we sought to answer was: "What behavioral patterns lead to cart abandonment on MyCoke360, and how can we predict and prevent it?". I assisted in the development of our logistic regression models and ensured the correct implementation of our feature engineering steps. I also contributed by combining our modeling results and insights into a cohesive narrative for this notebook.
+
+### Project Overview
+
 The goal of this modeling notebook is to examine MyCoke360 digital ordering behavior and identify patterns that drive cart abandonment. The target outcome for this analysis is whether a cart is abandoned within an order window. During our exploratory data analysis, we created a target variable and calculated an abandonment rate that was focused at the customer level. After shifting to the purchase window as our unit of measure, which is represented by the `CART_ID` above, we decided we needed to recalculate our target variable. Using the `EVENT_NAME` column, we created a target variable by comparing it to the `EVENT_TIMESTAMP_ADJ` column from the orders table. This timestamp has been adjusted to the local time zone and indicates when an order was created. We compared it to the occurrence of any of the following events in the `EVENT_NAME` column: `add_to_cart`,`update_cart`, or `UpdateCart_Cart_Clicked`. Previously, we used just the `add_to_cart` event, but given that the `google_analytics` data is known to have missed some events, we broadened it to include these other events. If `EVENT_TIMESTAMP_ADJ` occurred between the last of these events and the `CUTOFF_TIMESTAMP`, the cart was classified as not abandoned. If these events never appeared within that time window, the cart was also considered not abandoned. However, if those events occurred but no `EVENT_TIMESTAMP_ADJ` fell within the purchase window before the cutoff, the cart was classified as abandoned. This translates to a supervised learning binary classification problem, where the negative class (0) represents carts that are completed within the order window, and the positive class (1) represents carts that are abandoned.
 
 This modeling report will cover:
@@ -2129,26 +2135,3 @@ Future  continuation upon this modeling could include:
  - Deployment and monitoring: Package the final model into a production-ready dashboard or API, enabling continuous monitoring of predicted abandonment risk and real-time alerts for high-risk carts.
  
  - Temporal and sequence modeling: Also requiring an expanded dataset that includes pre-treatment data, we could implement time-aware models to capture event-level sequences and transitions that precede abandonment, allowing us to better understand behavioral activity through the ordering funnel.
-
-## Group Member Contributions
-
-Section | Contributor(s)
---- | ---
-Introduction | Eliza
-Feature Engineering- Cart ID | Eliza
-Feature Engineering- Target Variable | Eliza
-Feature Engineering- Days Since Last Purchased | Ashley
-Feature Engineering- Number of Items | Eliza
-Feature Engineering- Order Window ID | Kyle
-Items in Abandoned Carts | Kyle
-Events and Abandoned Carts | Kyle
-Time-Series Analysis | Eliza
-Random Forest | Eliza
-Hierarchical and GMM Clustering | Ashley
-DBSCAN Clustering | Kyle
-Association Rule Mining | Ashley
-Basic LM | Ashley
-Updated LM | Eliza / Ashley
-Summary of Findings | Eliza / Ashley
-Compilation | Eliza / Ashley / Lindsey
-Editing | All
