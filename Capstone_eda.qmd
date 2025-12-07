@@ -1,7 +1,6 @@
 ---
 title: "Exploratory Data Analysis: Swire Coca-Cola Cart Abandonment"
-author: "DataLAKE: Lindsey Ahlander, Ashley Goldstein, Kyle Aagard, Eliza Baier"
-date: "10/5/2025"
+author: "Lindsey Ahlander"
 format: 
   html:
     toc: true
@@ -25,16 +24,8 @@ library(caret)
 library(DBI)
 library(duckdb)
 library(tidyr)
-# library(data.table)
-# library(skimr)
 library(dplyr)
 library(ggplot2)
-# library(corrplot)
-# library(ggcorrplot)
-# library(janitor)
-# library(ggthemes)
-# library(psych)
-# library(naniar)
 library(knitr)
 library(lubridate)
 library(forcats)
@@ -42,15 +33,11 @@ library(patchwork)
 library(fuzzyjoin)
 library(skimr)
 library(data.table)
-# library(DMwR2)
-# library(car)
-
-# Set working directory
-# dir <- getwd()
-# setwd(dir)
 ```
 
 # Introduction
+
+Our group worked closely together to pull together our EDA. It required a lot of data wrangling and ensuring that our joins were accurate. We divided up the analysis on the joined data set so that each member could focus on a specific area of interest. I focused on analyzing correlation analysis and a baseline logistic regression model to inform future modeling efforts. In this report, I will include our shared introduction, purpose of analysis, data overview, data preparation, missing data, imputation, outliers, and finally my independent variable analysis. The rest of the EDA sections were completed by other group members and can be found in their respective reports.
 
 ## Purpose of Analysis
 
@@ -135,12 +122,6 @@ cutoff <- read.csv("cutoff_times.csv")
 operating <- read.csv("operating_hours.csv")
 orders <- read.csv("orders.csv")
 visit <- read.csv("visit_plan.csv")
-```
-
-```{r, glimpse, echo = FALSE}
-# Overview of the dataset
-# glimpse(google)  # Check structure
-# summary(google)  # Summary statistics
 ```
 
 ### Step 5: `orders` and `google_analytics` merge
@@ -542,255 +523,6 @@ CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION = factor(CUSTOMER_SUB_TRADE_CHANNEL_DESCR
 
 As we conducted our exploratory data analysis, we did not notice any obvious outliers. More thorough investigation will be done in the future to ensure any potential outliers, especially to any numeric variables we may create will not negatively affect our analysis.
 
-## Independent Variable Analysis
-
-When we realized we wanted to focus on purchasing behavior that led to abandonment, that helped to narrow our focus in our EDA. We broke the variable analysis down into related categories.
-
-### Device and Browsing Behavior
-
--   **Device category & operating system:** Most sessions come from desktops, with Windows dominating as the primary operating system.
--   **Device brand names:** Google, Apple, and Microsoft are the most common brands, reflecting concentration among a few large providers. This shows that optimizing experiences for these ecosystems could have the biggest impact.
-
-```{r}
-# Plot 1: Device category (Desktop, Mobile, Tablet)
-p1 <- google_analytics_orders |>
-  count(DEVICE_CATEGORY, sort = TRUE) |>
-  ggplot(aes(x = fct_reorder(DEVICE_CATEGORY, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Device Category Distribution",
-       x = "Device Category", y = "Count") +
-  theme_minimal()
-
-# Plot 2: Device brand names
-p2 <- google_analytics_orders |>
-  count(DEVICE_MOBILE_BRAND_NAME, sort = TRUE) |>
-  head(10) |>
-  ggplot(aes(x = fct_reorder(DEVICE_MOBILE_BRAND_NAME, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top 10 Device Brand Names",
-       x = "Device Brand Name", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Plot 3: Browser
-p3 <- google_analytics_orders |>
-  count(DEVICE_OPERATING_SYSTEM, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(DEVICE_OPERATING_SYSTEM, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top Operating Systems",
-       x = "Operating System", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Show p1 and p3 side-by-side
-(p1|p3)
-
-# Show p2
-p2
-```
-
-### Location/Operational Metrics
-
--   **Top Plants / Sales Offices:** Draper, UT is by far the most frequent sales office, followed by Denver and Tempe. This concentration highlights certain geographic hubs where abandonment may have an outsized revenue impact.
-
--   **Anchor Days:** Monday is the most common anchor day for ordering, which aligns with weekly replenishment cycles. The weekday spikes suggest that abandonment patterns may vary depending on the customer’s scheduled order day.
-
--   **Cutoff Frequency:** Most customers have weekly cutoff times, with smaller segments spacing cutoff times out to every two or four weeks. Weekly customers represent the highest risk group for repeat abandonment, since they generate the most sessions.
-
-```{r}
-# Plot 4: Plant / Sales Office
-p4 <- google_analytics_orders |>
-  count(SALES_OFFICE_DESC, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(SALES_OFFICE_DESC, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top 10 Plants / Sales Offices",
-       x = "Plant / Sales Office", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Plot 5: Anchor day (ordering day of week)
-p5 <- google_analytics_orders |>
-  count(ANCHOR_DAY_OF_WEEK, sort = TRUE) |>
-  ggplot(aes(x = fct_reorder(ANCHOR_DAY_OF_WEEK, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Distribution of Anchor Days",
-       x = "Anchor Day", y = "Count") +
-  theme_minimal()+
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Plot 6: Frequency buckets (every 1, 2, 4 weeks)
-p6 <- google_analytics_orders |>
-  count(FREQUENCY_FINAL, sort = TRUE) |>
-  ggplot(aes(x = fct_reorder(FREQUENCY_FINAL, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Customer Order Frequency",
-       x = "Frequency", y = "Count") +
-  theme_minimal()+
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Show p4
-p4
-
-# Show p5 and p6 side-by-side
-(p5|p6)
-```
-
-### Page Activity
-
--   **Event Page Names & Titles:** Cart, Checkout, and Orders pages appear heavily among the top events. These are key funnel steps where abandonment is most likely to occur. The presence of “null” values suggests some event tracking limitations, which we will need to keep in mind when interpreting data.
-
-```{r}
-# Plot 7: Event page names
-p7 <- google_analytics_orders |>
-  count(EVENT_PAGE_NAME, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(EVENT_PAGE_NAME, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top 10 Event Page Names",
-       x = "Event Page Name", y = "Count") +
-  coord_flip() +
-  theme_minimal()
-
-# Plot 8: Event page titles
-p8 <- google_analytics_orders |>
-  count(EVENT_PAGE_TITLE, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(EVENT_PAGE_TITLE, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top 10 Event Page Titles",
-       x = "Event Page Title", y = "Count") +
-  coord_flip() + 
-  theme_minimal() 
-
-# Facet wrap
-p7
-p8
-```
-
-## Business Demographics
-
--   **Business Categories:** Restaurants and food services dominate the business category breakdown. These segments likely contribute to cart abandonment due to sheer volume of market share and possible difficulties with staff turnover or seasonality needs.
-
-```{r}
-# Plot 9: Customer sub trade channels
-p9 <- google_analytics_orders |>
-  count(COLD_DRINK_CHANNEL_DESCRIPTION, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(COLD_DRINK_CHANNEL_DESCRIPTION, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top 10 Business Category",
-       x = "Business Category", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Plot 10: Customer sub trade channels
-p10 <- google_analytics_orders |>
-  count(CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top 10 Business Sub Categories",
-       x = "Business Sub Category", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Arrange: 2 per row, then 1 on last row
-p9|p10
-```
-
-### Shipping Attributes
-
--   **Cutoff Times:** Most cutoff times are clustered around the standard cutoff time of 5:00 PM, but there is variation across sales offices. Customers ordering close to cutoff deadlines may abandon carts more often if they miss their window. We can explore this more during modeling.
-
--   **Shipping Conditions:** “48 Hours” shipping is most common, which suggests relatively consistent delivery expectations. Differences in shipping speed could interact with cart abandonment, particularly for time-sensitive customers. Those that missed cutoffs or need immediate attention moving towards 24 Hours or expedited methods.
-
-```{r}
-# Plot 12: Cutoff Times
-p12 <- google_analytics_orders |>
-  count(CUTOFFTIME__C, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(CUTOFFTIME__C, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Top CutOff Times",
-       x = "Cutoff Time", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Plot 13: Shipping Description
-p13 <- google_analytics_orders |>
-  count(SHIPPING_CONDITIONS_DESC, sort = TRUE) |>
-  slice_head(n = 10) |>
-  ggplot(aes(x = fct_reorder(SHIPPING_CONDITIONS_DESC, n), y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Shipping Time Distribution",
-       x = "Shipping Times", y = "Count") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Facet wrap
-(p12|p13) 
-```
-
-### Target variable
-
--   **Overall Distribution:** The majority of google analytic events are classified as “Unrelated” to building a cart or purchasing. There is a meaningful amount of abandoned carts, and less though a meaningful share show abandonment behavior.
-
--   **Abandonment Comparison:** When filtering out unrelated events, we see a clearer binary split between purchased and abandoned orders. This binary framing will be central to modeling abandonment risk.
-
-```{r}
-# Plot: Target Variable Distribution (Cart Abandonment)
-p14 <- google_analytics_orders |>
-  count(ABANDONED_CART, sort = TRUE) |>
-  mutate(ABANDONED_CART = factor(ABANDONED_CART,
-                                 levels = c(0,1,2),
-                                 labels = c("Not Abandoned", "Abandoned", "Unrelated Events"))) |>
-  ggplot(aes(x = ABANDONED_CART, y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Cart Abandonment Behaviors",
-       x = "Abandonment Status", y = "Count") +
-  theme_minimal()
-
-# Plot 15: Target distribution no unrelated events
-p15 <- google_analytics_orders |>
-  filter(ABANDONED_CART %in% c(0,1)) |>
-  count(ABANDONED_CART, sort = TRUE) |>
-  mutate(ABANDONED_CART = factor(ABANDONED_CART,
-                                 levels = c(0,1),
-                                 labels = c("Not Abandoned", "Abandoned"))) |>
-  ggplot(aes(x = ABANDONED_CART, y = n)) +
-  geom_bar(stat = "identity", fill = "#BB021E") +
-  labs(title = "Cart Abandonment Behaviors",
-       x = "Abandonment Status", y = "Count") +
-  theme_minimal()
-
-# Show plots p14 and p15
-p14|p15
-```
-
-## Numerical variable analysis
-
-Due to our choice to limit our scope to behavioral analysis, we were left with no numerical variables like revenue to work with. In the future, we plan to do further analysis to create numerical variables. For example, one that would be important to calculate would be the number of items in cart at checkout or abandonment. This lends itself to greater understanding of customer behavior leading to cart abandonment.
-
-## Dataset
-
-### Merging
-
-The majority of our table merging was completed in Databricks. First, `visit_plan` and `cut_off times` were merged to obtain a single table that contained all relevant information pertaining to customer cutoff times. The resulting table was joined to the customer table. To ensure an accurate join without duplication or mixed information, five keys were used to match rows. An anchor range was used to determine if the policy changed so we could keep up with accurate cutoff dates.
-
-To join the google analytics table, we started by adjusting the event timestamp to the customer's local time, creating a column called `EVENT_TIMESTAMP_ADJ`. Since cutoff times were recorded in local time zones, the analytics event needed to be converted to be accurate. We also feature engineered a series of order windows for each anchor date, using our anchor range to understand if the policy changed. From there, we could determine the closest future cutoff date to a policy and noted that as `cutoff_timestamp`. This will allow us to create our target variable by noting if there was an order timestamp within the range of the analytics `add_to_cart` event and the `cutoff_timestamp`.
-
-### Feature Engineering
-
-Feature engineering is a critical part of the EDA, for us it involved identifying and labeling our target variable. Below are the steps we took during this process
-
--   Convert categorical and operational dimensions (e.g., device type, anchor day, frequency, cutoff times) into model-ready variables.
-
--   Engineer time-based features derived from anchor date and frequency like `EVENT_TIMESTAMP_ADJ`, `CUTOFF_TIMESTAMP` to capture order based events.
-
--   Create target variable by determining if there was an order placed between an "add_to_cart" event and the customer cutoff time.
-
 ## Correlation Exploration
 
 Since our dataset is primarily categorical, we will not be performing a traditional correlation analysis. Instead, we will be looking at the relationships between categorical variables and our target variable, `ABANDONED_CART`. This section will include chi-square tests and visualizations to understand how different categories relate to cart abandonment behavior.
@@ -997,23 +729,3 @@ Our next steps include:
 ## Conclusion of Findings
 
 In conclusion, our exploratory data analysis allowed us to understand the dataset and its limitations, create a target variable, and identify key relationships that will help inform future modeling efforts. We were able to join multiple datasets to create a comprehensive view of customer behavior leading up to cart abandonment. Now that we have this dataset as our foundation, our future work will focus on using those key relationships identified in this EDA to build predictive models that can help reduce cart abandonment and ultimately increase revenue for Swire Coca-Cola.
-
-## Group Member Contributions
-
-Section | Contributor(s)
---- | ---
-Introduction | Ashley
-Data Sets | Ashley
-Note on Dataset Selection | Ashley
-Data Preparation | Eliza / Kyle
-Missing Data | Eliza
-Imputation | Kyle
-Outliers | Eliza
-Independent Variable Analysis | Ashley
-Business Demographics | Ashley / Eliza
-Numerical Variable Analysis | Eliza
-Dataset (Merging & Feature Engineering) | Ashley
-Correlation Exploration | Lindsey
-Logistic Regression | Lindsey
-Summary of Findings | All
-
